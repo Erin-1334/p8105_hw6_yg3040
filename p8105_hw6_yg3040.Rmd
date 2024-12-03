@@ -1,0 +1,335 @@
+---
+title: "Homework 6 solutions"
+author: "Yue Ge"
+date: '`r format(Sys.time(), "%Y-%m-%d")`'
+output: github_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(purrr)
+library(ggplot2)
+library(MASS)
+library(modelr)
+```
+
+## Problem 1
+
+```{r}
+weather_df = 
+  rnoaa::meteo_pull_monitors(
+    c("USW00094728"),
+    var = c("PRCP", "TMIN", "TMAX"), 
+    date_min = "2022-01-01",
+    date_max = "2022-12-31") |>
+  mutate(
+    name = recode(id, USW00094728 = "CentralPark_NY"),
+    tmin = tmin / 10,
+    tmax = tmax / 10) |>
+  dplyr::select(name, id, everything())
+```
+
+**The boostrap is helpful when you'd like to perform inference for a parameter / value / summary that doesn't have an easy-to-write-down distribution in the usual repeated sampling framework. We'll focus on a simple linear regression with `tmax` as the response with `tmin` and `prcp` as the predictors, and are interested in the distribution of two quantities estimated from these data:**
+
+-   $\hat{r}^2$
+
+-   $log(\hat{\beta_1} * \hat{\beta_2})$
+
+**Use 5000 bootstrap samples and, for each bootstrap sample, produce estimates of these two quantities. Plot the distribution of your estimates, and describe these in words. Using the 5000 bootstrap estimates, identify the 2.5% and 97.5% quantiles to provide a 95% confidence interval for $\hat{r}^2$ and $log(\hat{\beta_1} * \hat{\beta_2})$. Note: `broom::glance()` is helpful for extracting $\hat{r}^2$ from a fitted regression, and `broom::tidy()` (with some additional wrangling) should help in computing $log(\hat{\beta_1} * \hat{\beta_2})$.**
+
+
+```{r, warning=FALSE}
+boot_strap = weather_df %>% 
+  modelr::bootstrap(n = 5000) %>% 
+  mutate(
+    models = map(strap, ~lm(tmax ~ tmin + prcp, data = .x)),
+    models_beta = map(models, broom::glance),
+    models_r2 = map(models, broom::tidy)) %>% 
+  unnest(models_r2, models_beta) %>% 
+  dplyr::select(.id, term, estimate, r.squared) %>% 
+  pivot_wider(names_from = term, values_from = estimate) %>% 
+  rename(
+    beta_0 = `(Intercept)`,
+    beta_1 = tmin,
+    beta_2 = prcp) 
+
+results = boot_strap %>%
+  summarise(r.squared = r.squared,
+    log_beta12 = log(beta_1 * beta_2))
+
+results_noNA = results %>%
+  na.omit()
+
+head(results)
+head(results_noNA)
+```
+
+```{r}
+r2_ci = 
+  quantile(pull(results,r.squared), probs = c(0.025,0.975)) %>% 
+  knitr::kable()
+
+r2_ci_noNA = 
+  quantile(pull(results_noNA,r.squared), probs = c(0.025,0.975)) %>% 
+  knitr::kable()
+
+log_ci = 
+  quantile(pull(results_noNA,log_beta12), probs = c(0.025,0.975)) %>% 
+  knitr::kable()
+  
+r2_ci
+r2_ci_noNA
+log_ci
+```
+
+```{r}
+r2_dist = results %>%
+  ggplot(aes(x = r.squared)) +
+  geom_density() +
+  labs(title = "Distribution of estimated r square", x = "estimated r square")
+
+r2_dist
+```
+
+* The $\hat{r}^2$ are all close to 1, meaning there is strong linear relation and `tmin` and `prcp` are good predictors of `tmax`. 
+* The distribution is approximately normal with a little left-skew.
+
+```{r, warning=FALSE}
+b1b2_dist = results_noNA %>%
+  ggplot(aes(x = log_beta12)) +
+  geom_density() +
+  labs(title = "Distribution of estimated log(beta1*beta2)", x = "estimated log(beta1*beta2)")
+
+b1b2_dist
+
+```
+
+* The distribution is left-skewed with some outliers. 
+* The distribution has a mode around -5.
+
+## Problem 2
+
+```{r}
+homicide = read_csv("./data/homicide-data.csv")
+```
+
+**Create a `city_state` variable (e.g."Baltimore, MD"), and a binary variable indicating whether the homicide is solved. Omit cities Dallas, TX; Phoenix, AZ; and Kansas City, MO -- these don't report victim race. Also omit Tulsa, AL -- this is a data entry mistake. For this problem, limit your analysis those for whom `victim_race` is `white` or `black`. Be sure that `victim_age` is numeric.**
+
+```{r, warning=FALSE}
+homicide <- homicide %>% 
+  mutate(city_state = paste0(city,", ",state),
+         solved = ifelse(disposition == "Closed by arrest",1,0)) %>% 
+  filter(!city_state %in% c("Dallas, TX", "Phoenix, AZ", "Kansas City, MO", "Tulsa, AL")) %>%
+  filter(victim_race == "White" | victim_race == "Black") %>% 
+  mutate(victim_age = as.numeric(victim_age))
+```
+
+**For the city of Baltimore, MD, use the `glm` function to fit a logistic regression with resolved vs unresolved as the outcome and victim age, sex and race as predictors. Save the output of `glm` as an R object; apply the `broom::tidy` to this object; and obtain the estimate and confidence interval of the adjusted odds ratio for solving homicides comparing male victims to female victims keeping all other variables fixed.**
+
+```{r}
+baltimore = homicide %>% 
+  filter(city == "Baltimore") %>% 
+  dplyr::select(solved, victim_age, victim_sex, victim_race) %>%
+  mutate(victim_sex = fct_relevel(victim_sex, "Female"))
+```
+
+```{r}
+baltimore_model = baltimore %>% 
+  glm(solved ~ victim_age + victim_race + victim_sex, data = ., family = binomial())
+```
+
+```{r}
+save(baltimore_model, file = "./results/Baltimore_logistic_model.RData")
+```
+
+```{r}
+baltimore_model %>% 
+  broom::tidy() %>% 
+  knitr::kable(digits = 3)
+```
+
+```{r}
+baltimore_model_aor = baltimore_model %>% 
+  broom::tidy() %>%
+  filter(term == 'victim_sexMale') %>% 
+  summarise(estimate = estimate,
+            OR = exp(estimate),
+            OR_lower = exp(estimate - 1.96 * std.error),
+            OR_upper = exp(estimate + 1.96 * std.error) ) %>%
+  knitr::kable(digits = 3)
+
+baltimore_model_aor
+```
+
+**Now run `glm` for each of the cities in your dataset, and extract the adjusted odds ratio (and CI) for solving homicides comparing male victims to female victims. Do this within a "tidy" pipeline, making use of `purrr::map`, list columns, and `unnest` as necessary to create a dataframe with estimated ORs and CIs for each city.**
+
+```{r}
+all_model = function(citystate){
+  
+  city_glm = homicide %>% 
+    filter(city_state == citystate) %>% 
+    glm(solved ~ victim_sex + victim_race + victim_age, family = binomial, data = .) %>% 
+    broom::tidy() %>% 
+    filter(term == "victim_sexMale") %>% 
+    summarise(
+         estimate = estimate,
+         OR = exp(estimate), 
+         OR_lower = exp(estimate - 1.96*std.error), 
+         OR_upper = exp(estimate + 1.96*std.error))
+    
+  city_glm
+  
+}
+```
+
+```{r}
+glm_all = homicide %>%
+  dplyr::select(city_state) %>%
+  unique() %>%
+  mutate(glm = map(city_state, all_model)) %>% 
+  unnest(glm) %>% 
+  arrange(desc(OR))
+
+glm_all %>%
+  knitr::kable(digits = 3)
+```
+
+**Create a plot that shows the estimated ORs and CIs for each city. Organize cities according to estimated OR, and comment on the plot.**
+
+```{r}
+ggplot(glm_all, aes(x=OR, y = fct_reorder(city_state, OR))) +
+  geom_point(color = "blue") +
+  geom_errorbar(aes(xmin = OR_lower, xmax = OR_upper)) +
+  labs(x = 'OR with 95% CI', y = 'City, State', title = 'Estimated ORs and CIs for each city') +
+  theme_minimal() + 
+  theme(
+    axis.text.y = element_text(hjust = 1, size = 8), 
+    axis.title = element_text(size = 12), 
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold") 
+  )
+```
+
+* New York, NY has the smallest adjusted OR. 
+* Albuquerque, NM has the largest adjusted OR.
+
+
+## Problem 3
+
+**Load and clean the data for regression analysis (i.e. convert numeric to factor where appropriate, check for missing data, etc.).**
+
+```{r}
+birth_weight = read.csv("./data/birthweight.csv")
+```
+
+```{r}
+birth_weight = birth_weight %>%
+  janitor::clean_names() %>% 
+  mutate(babysex = case_when(babysex == 1 ~ 'male',
+                             babysex == 2 ~ 'female'),
+         frace = recode(frace, "1" = "White", "2" = "Black", "3" = "Asian", "4" = "Puerto Rican", "8" = "Other", "9" = "Unknown"),
+         malform = case_when(malform == 0 ~ 'absent',
+                             malform == 1 ~ 'present'),
+         mrace = recode(mrace, "1" = "White", "2" = "Black", "3" = "Asian", "4" = "Puerto Rican", "8" = "Other"))
+
+sum(is.na(birth_weight))
+```
+
+* There's no missing data.
+
+**Propose a regression model for birthweight. This model may be based on a hypothesized structure for the factors that underly birthweight, on a data-driven model-building process, or a combination of the two. Describe your modeling process and show a plot of model residuals against fitted values -- use `add_predictions` and `add_residuals` in making this plot.**
+
+Applied backward stepwise to fit a model based on all data (babysex, bhead, blength, delwt, fincome, gaweeks, mheight, mrace, parity, ppwt and smoken) as predictors. 
+
+```{r}
+fit1 = lm(bwt ~ ., data = birth_weight) %>% 
+  step(direction = "backward", trace = FALSE) 
+
+fit1 %>% 
+  broom::tidy() %>% 
+  knitr::kable()
+```
+
+Make a plot of model residuals against fitted values.
+
+```{r}
+birth_weight %>% 
+    add_predictions(fit1) %>% 
+    add_residuals(fit1) %>% 
+    ggplot(aes(x = pred, y = resid)) +
+    geom_point(alpha = 0.5, color = "blue") + 
+    geom_smooth(method = "lm", color = "red") + 
+    labs(title = "Residuals against fitted values", 
+       x = "Predicted", 
+       y = "Residuals") +
+    theme_minimal() + 
+    theme(
+      plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),
+      axis.text = element_text(size = 10),  
+      axis.title = element_text(size = 12)  
+  )
+```
+
+
+**Compare your model to two others:**
+
+-   **One using length at birth and gestational age as predictors (main effects only)**
+
+```{r}
+fit2 = lm(bwt ~ blength + gaweeks, data = birth_weight)
+
+fit2 %>%
+  broom::tidy() %>% 
+  knitr::kable()
+```
+
+-   **One using head circumference, length, sex, and all interactions (including the three-way interaction) between these**
+
+```{r}
+fit3 = lm(bwt ~ bhead * blength * babysex, data = birth_weight)
+
+fit3 %>%
+  broom::tidy() %>%
+  knitr::kable()
+```
+
+**Make this comparison in terms of the cross-validated prediction error; use `crossv_mc` and functions in `purrr` as appropriate.**
+
+```{r}
+cv_birth_weight = 
+    crossv_mc(birth_weight, 100) %>% 
+    mutate(train = map(train, as_tibble),
+           test = map(test,as_tibble)) %>%
+    mutate(model1 = map(train,~fit1),
+           model2 = map(train,~fit2),
+           model3 = map(train,~fit3)) %>% 
+    mutate(rmse_model1 = map2_dbl(model1, test, ~rmse(model = .x,data = .y)),
+           rmse_model2 = map2_dbl(model2, test, ~rmse(model = .x,data = .y)),
+           rmse_model3 = map2_dbl(model3, test, ~rmse(model = .x,data = .y))
+    )
+
+cv_birth_weight %>% 
+  dplyr::select(starts_with("rmse")) %>% 
+  pivot_longer(
+    everything(),
+    names_to = "model", 
+    values_to = "rmse",
+    names_prefix = "rmse_") %>% 
+  mutate(model = fct_inorder(model)) %>% 
+  ggplot(aes(x = model, y = rmse)) + 
+  geom_violin() + 
+  labs(
+    title = "RMSE Distribution Across Models",
+    x = "Model",
+    y = "RMSE"
+  ) +
+  theme_minimal() +  
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 14, face = "bold"),  # Center and style title
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10),  # Rotate x-axis labels for readability
+    axis.title = element_text(size = 12),  # Adjust axis title size
+    legend.position = "none"  # Remove legend (colors are only for aesthetics)
+  )
+```
+
+* Model 1 (which includes all predictors) has the best distribution of RMSE (smallest RMSE).
+* Model 2 (which uses length at birth and gestational age as predictors) has the worst distribution of RMSE (largest RMSE).
